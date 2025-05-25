@@ -274,10 +274,56 @@ def show_add_student_form():
     # Load dữ liệu ban đầu
     load_student_list()
 
+def show_capture_face_form():
+    """Hiển thị form nhập tên trước khi chụp ảnh"""
+    input_window = tk.Toplevel()
+    input_window.title("Thu thập ảnh khuôn mặt")
+    input_window.geometry("400x150")
+    
+    # Frame nhập thông tin
+    input_frame = ttk.LabelFrame(input_window, text="Nhập thông tin", padding=10)
+    input_frame.pack(fill="x", padx=10, pady=5)
+    
+    ttk.Label(input_frame, text="Nhập mã số SV:").grid(row=0, column=0, pady=5, padx=5)
+    masv_entry = ttk.Entry(input_frame, width=30)
+    masv_entry.grid(row=0, column=1, pady=5, padx=5)
+    
+    def start_capture():
+        masv = masv_entry.get().strip()
+        if not masv:
+            messagebox.showwarning("Lỗi", "Vui lòng nhập mã số sinh viên!")
+            return
+        if not masv.isdigit():
+            messagebox.showwarning("Lỗi", "Mã số sinh viên phải là số!")
+            return
+        
+        input_window.destroy()
+        from capture_face import capture_face
+        capture_face(masv)
+    
+    ttk.Button(input_frame, text="Bắt đầu chụp", command=start_capture).grid(row=1, column=1, pady=10)
+    
+    # Căn giữa cửa sổ
+    input_window.update()
+    input_window.geometry(f"+{int(input_window.winfo_screenwidth()/2 - input_window.winfo_width()/2)}+"
+                         f"{int(input_window.winfo_screenheight()/2 - input_window.winfo_height()/2)}")
+
+def train_model():
+    """Gọi file train_cnn.py để huấn luyện mô hình"""
+    try:
+        messagebox.showinfo("Đang huấn luyện", "Quá trình huấn luyện mô hình sẽ bắt đầu.\nVui lòng chờ cho đến khi hoàn thành.")
+        result = subprocess.run(["python", "train_cnn.py"], capture_output=True, text=True)
+        if result.returncode == 0:
+            messagebox.showinfo("Thành công", "Đã huấn luyện xong mô hình!")
+        else:
+            messagebox.showerror("Lỗi", f"Lỗi khi huấn luyện mô hình:\n{result.stderr}")
+    except Exception as e:
+        messagebox.showerror("Lỗi", f"Không thể huấn luyện mô hình: {str(e)}")
+
 # Giao diện chính
 window = tk.Tk()
 window.title("HỆ THỐNG ĐIỂM DANH")
-window.geometry("400x300")
+window.geometry("400x350")
 # Frame chính
 main_frame = ttk.Frame(window, padding="20")
 main_frame.pack(fill="both", expand=True)
@@ -304,12 +350,17 @@ ttk.Button(main_frame,
 ttk.Button(main_frame,
           text="3. Thu thập ảnh khuôn mặt",
           style="Menu.TButton",
-          command=lambda: capture_face.capture_face(None)).pack(pady=5)
+          command=show_capture_face_form).pack(pady=5)
 
 ttk.Button(main_frame,
           text="4. Điểm danh khuôn mặt",
           style="Menu.TButton",
           command=start_face_attendance).pack(pady=5)
+
+ttk.Button(main_frame,
+          text="5. Huấn luyện mô hình",
+          style="Menu.TButton",
+          command=train_model).pack(pady=5)
 
 #ttk.Button(main_frame,
 #          text="5. Xem lịch sử điểm danh",

@@ -1,26 +1,34 @@
-import face_recognition
+import traceback
 import cv2
-import os
 import numpy as np
+from tensorflow.keras.models import load_model
 import db_handler
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-def load_known_faces(folder="capture"):
-    known_encodings = []
-    known_ids = []
-
-    for filename in os.listdir(folder):
-        if filename.endswith(".jpg") or filename.endswith(".png"):
-            img_path = os.path.join(folder, filename)
-            img = face_recognition.load_image_file(img_path)
-            encoding = face_recognition.face_encodings(img)
-            if encoding:
-                known_encodings.append(encoding[0])
-                student_id = os.path.splitext(filename)[0]
-                known_ids.append(student_id)
-    return known_encodings, known_ids
+def load_model_and_labels():
+    """Load model đã train và labels"""
+    try:
+        # Load model in new .keras format
+        model = load_model('face_recognition_model.keras', compile=False)
+        model.compile(
+            optimizer='adam',
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        
+        # Load label mapping
+        label_dict = np.load('label_encoder.npy', allow_pickle=True).item()
+        
+        print("Model and labels loaded successfully")
+        print(f"Available labels: {list(label_dict.values())}")
+        return model, label_dict
+        
+    except Exception as e:
+        print(f"Error loading model: {str(e)}")
+        traceback.print_exc()
+        return None, None
 
 def recognize_faces(ma_mh=None):
     """Nhận diện khuôn mặt và điểm danh cho môn học cụ thể"""
@@ -34,14 +42,16 @@ def recognize_faces(ma_mh=None):
         print("Lỗi khi tạo buổi học mới!")
         return
 
-    known_encodings, known_ids = load_known_faces()
-    if not known_encodings:
-        print("Không có dữ liệu khuôn mặt.")
+    # Load model và labels
+    model, label_encoder = load_model_and_labels()
+    if model is None or label_encoder is None:
+        print("Không thể load model hoặc labels!")
         return
     
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     cap = cv2.VideoCapture(0)
     recognized = set()
-    attendance_records = []  # Lưu trữ các bản ghi điểm danh
+    attendance_records = []
 
     print("Đang nhận dạng khuôn mặt... Nhấn 'q' để thoát.")
 
@@ -50,50 +60,47 @@ def recognize_faces(ma_mh=None):
         if not ret:
             break
             
-        # Lật ngược frame theo chiều ngang
         frame = cv2.flip(frame, 1)
-
-        # Thu nhỏ hình ảnh để xử lý nhanh hơn
-        small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-        rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-
-        face_locations = face_recognition.face_locations(rgb_small)
-        face_encodings = face_recognition.face_encodings(rgb_small, face_locations)
-
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        
         current_time = datetime.now()
 
-        for encoding, loc in zip(face_encodings, face_locations):
-            matches = face_recognition.compare_faces(known_encodings, encoding, tolerance=0.5)
-            if True in matches:
-                face_distances = face_recognition.face_distance(known_encodings, encoding)
-                best_match = np.argmin(face_distances)
-                
-                if matches[best_match]:
-                    student_id = known_ids[best_match]
-                    
-                    # Vẽ khung và hiển thị thông tin
-                    top, right, bottom, left = [v * 4 for v in loc]
-                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-                    
-                    # Lấy tên sinh viên từ CSDL
-                    student_name = db_handler.get_student_name(student_id)
-                    display_text = f"{student_id} - {student_name}"
-                    
-                    # Hiển thị thông tin chi tiết hơn
-                    cv2.putText(frame, display_text, (left, top - 10),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        for (x, y, w, h) in faces:
+            # Cắt và xử lý khuôn mặt
+            face = frame[y:y+h, x:x+w]
+            face = cv2.resize(face, (96, 96))
+            face = face.astype('float32') / 255.0
+            face = np.expand_dims(face, axis=0)
 
-                    # Điểm danh ngay lập tức nếu chưa được điểm danh
-                    if student_id not in recognized:
-                        recognized.add(student_id)
-                        # Lưu vào danh sách để batch insert sau
-                        attendance_records.append({
-                            'MaSV': student_id,
-                            'MaBuoi': buoi_hoc_id,
-                            'ThoiGian': current_time,
-                            'CoMat': True
-                        })
-                        print(f"Đã điểm danh: {display_text}")
+            # Dự đoán
+            predictions = model.predict(face)
+            predicted_class = np.argmax(predictions[0])
+            confidence = predictions[0][predicted_class]
+            
+            if confidence > 0.5:  # Ngưỡng tin cậy
+                student_id = label_encoder[predicted_class]
+                
+                # Vẽ khung và hiển thị thông tin
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                
+                # Lấy tên sinh viên từ CSDL
+                student_name = db_handler.get_student_name(student_id)
+                display_text = f"{student_id} - {student_name} ({confidence:.2f})"
+                
+                cv2.putText(frame, display_text, (x, y-10),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                # Điểm danh
+                if student_id not in recognized:
+                    recognized.add(student_id)
+                    attendance_records.append({
+                        'MaSV': student_id,
+                        'MaBuoi': buoi_hoc_id,
+                        'ThoiGian': current_time,
+                        'CoMat': True
+                    })
+                    print(f"Đã điểm danh: {display_text}")
 
         cv2.imshow("Attendance", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -102,7 +109,7 @@ def recognize_faces(ma_mh=None):
     cap.release()
     cv2.destroyAllWindows()
 
-    # Lưu tất cả bản ghi điểm danh vào CSDL
+    # Lưu điểm danh và hiển thị báo cáo
     if attendance_records:
         try:
             db_handler.batch_add_attendance(attendance_records)

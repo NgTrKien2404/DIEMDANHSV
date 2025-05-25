@@ -1,213 +1,148 @@
 import os
 import cv2
 import numpy as np
-import time
-import face_recognition
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Flatten, Dropout, BatchNormalization
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.regularizers import l2
 import matplotlib.pyplot as plt
 
-# Constants
-IMG_SIZE = 96
-CAPTURE_DIR = "capture"
-
-# Haar cascade for face detection
-FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-
-def preprocess_image(img):
-    """Detect and preprocess a face from an image."""
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(gray, 1.1, 5, minSize=(60, 60), maxSize=(200, 200))
-
-    if len(faces) == 0:
-        return None
-
-    x, y, w, h = faces[0]
-    margin = 20
-    x, y = max(0, x - margin), max(0, y - margin)
-    w = min(img.shape[1] - x, w + 2 * margin)
-    h = min(img.shape[0] - y, h + 2 * margin)
-    face = img[y:y + h, x:x + w]
-
-    face = cv2.resize(face, (IMG_SIZE, IMG_SIZE))
-    lab = cv2.cvtColor(face, cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab)
-    l = cv2.createCLAHE(3.0, (8, 8)).apply(l)
-    face = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2RGB)
-    face = face.astype('float32')
-    return (face - face.mean()) / (face.std() + 1e-7)
-
-def load_dataset(folder=CAPTURE_DIR):
-    """Load and preprocess the dataset."""
-    images, labels = [], []
-    for file in os.listdir(folder):
-        if file.lower().endswith(('.jpg', '.png')):
-            path = os.path.join(folder, file)
-            img = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
-            processed = preprocess_image(img)
-            if processed is not None:
-                images.append(processed)
-                labels.append(file.split('_')[0])
+def load_dataset(folder="capture/train_data"):
+    images = []
+    labels = []
+    for filename in os.listdir(folder):
+        if filename.endswith((".jpg", ".png")):
+            img_path = os.path.join(folder, filename)
+            img = cv2.imread(img_path)
+            img = cv2.resize(img, (96, 96))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = img.astype('float32') / 255.0  # CHUẨN HÓA ẢNH
+            images.append(img)
+            # Giả sử tên file là maSV_xxx.jpg
+            label = filename.split("_")[0]
+            labels.append(label)
     return np.array(images), np.array(labels)
 
 def create_model(num_classes):
-    """Build the CNN model."""
     model = Sequential([
-        Conv2D(32, (3, 3), padding='same', input_shape=(IMG_SIZE, IMG_SIZE, 3)), BatchNormalization(),
-        Conv2D(32, (3, 3), padding='same', activation='relu'), BatchNormalization(),
-        MaxPooling2D((2, 2)), Dropout(0.25),
-
-        Conv2D(64, (3, 3), padding='same'), BatchNormalization(),
-        Conv2D(64, (3, 3), padding='same', activation='relu'), BatchNormalization(),
-        MaxPooling2D((2, 2)), Dropout(0.25),
-
-        Conv2D(128, (3, 3), padding='same'), BatchNormalization(),
-        Conv2D(128, (3, 3), padding='same', activation='relu'), BatchNormalization(),
-        MaxPooling2D((2, 2)), Dropout(0.25),
-
-        Conv2D(256, (3, 3), padding='same'), BatchNormalization(),
-        Conv2D(256, (3, 3), padding='same', activation='relu'), BatchNormalization(),
-        MaxPooling2D((2, 2)), Dropout(0.25),
-
+        Conv2D(32, (3, 3), activation='relu', input_shape=(96, 96, 3)),
+        MaxPooling2D((2, 2)),
+        Dropout(0.2),
+        Conv2D(64, (3, 3), activation='relu'),
+        MaxPooling2D((2, 2)),
+        Dropout(0.2),
         Flatten(),
-        Dense(512, activation='relu'), BatchNormalization(), Dropout(0.5),
-        Dense(256, activation='relu'), BatchNormalization(), Dropout(0.5),
+        Dense(128, activation='relu'),
+        Dropout(0.3),
         Dense(num_classes, activation='softmax')
     ])
     return model
 
 def train_face_recognition():
-    """Train the CNN model."""
     X, y = load_dataset()
-    if X.size == 0:
-        print("Khong tim thay du lieu training!")
-        return None, None
 
+    # Loại bỏ các lớp có ít hơn 2 ảnh
+    unique, counts = np.unique(y, return_counts=True)
+    valid_classes = unique[counts >= 2]
+    mask = np.isin(y, valid_classes)
+    X = X[mask]
+    y = y[mask]
+
+    if len(np.unique(y)) < 2:
+        raise ValueError("Cần ít nhất 2 lớp (mỗi lớp >= 2 ảnh) để train. Vui lòng bổ sung dữ liệu.")
+
+    # Encode labels
     le = LabelEncoder()
-    y_enc = le.fit_transform(y)
-    y_cat = to_categorical(y_enc)
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y_cat, test_size=0.2, random_state=42)
-    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
-
-    datagen = ImageDataGenerator(
-        rotation_range=20,
-        width_shift_range=0.2,
-        height_shift_range=0.2,
-        horizontal_flip=True,
-        zoom_range=0.2,
-        brightness_range=[0.8, 1.2],
-        fill_mode='nearest'
+    y_encoded = le.fit_transform(y)
+    y_categorical = to_categorical(y_encoded)
+                   
+    # Split dataset
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y_categorical, test_size=0.3, random_state=42, stratify=y
     )
 
+    # Data Augmentation
+    datagen = ImageDataGenerator(
+        rotation_range=15,
+        width_shift_range=0.1,
+        height_shift_range=0.1,
+        horizontal_flip=True
+    )
+    datagen.fit(X_train)
+
+    # Create and compile model
     model = create_model(len(le.classes_))
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    model.compile(
+        optimizer=Adam(learning_rate=0.0005),
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
 
-    callbacks = [
-        EarlyStopping(monitor='val_accuracy', patience=20, restore_best_weights=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=10, min_lr=1e-6, verbose=1)
-    ]
-
-    history = model.fit(
-        datagen.flow(X_train, y_train, batch_size=32),
-        epochs=100,
-        validation_data=(X_val, y_val),
-        callbacks=callbacks,
+    # Early stopping callback
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=10,  # Tăng từ 10 lên 15
+        restore_best_weights=True,
+        min_delta=0.001  # Thêm ngưỡng tối thiểu để xem xét cải thiện
+    )
+    
+    # Learning rate reduction callback
+    reduce_lr = ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=5,  # Tăng từ 5 lên 8
+        min_lr=1e-5,
+        verbose=1  # Thêm để theo dõi thay đổi learning rate
+    )
+    
+    # Model checkpoint callback
+    checkpoint = ModelCheckpoint(
+        'best_model.keras',
+        monitor='val_accuracy',
+        save_best_only=True,
         verbose=1
     )
+    
+    # Train model with augmentation
+    history = model.fit(
+        datagen.flow(X_train, y_train, batch_size=16),
+        epochs=50,
+        validation_data=(X_val, y_val),
+        callbacks=[early_stopping, reduce_lr, checkpoint]
+    )
 
-    plot_training_results(history)
-    return model, le
+    # Lưu model và label encoder
+    model.save('face_recognition_model.keras')
+    label_dict = dict(enumerate(le.classes_))
+    np.save('label_encoder.npy', label_dict)
 
-def plot_training_results(history):
-    """Plot training accuracy and loss."""
+    # Vẽ lại biểu đồ
     plt.figure(figsize=(12, 4))
     plt.subplot(1, 2, 1)
-    plt.plot(history.history['accuracy'], label='Train')
-    plt.plot(history.history['val_accuracy'], label='Validation')
-    plt.title('Accuracy')
+    plt.plot(history.history['accuracy'], label='Training Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+    plt.title('Model Accuracy')
     plt.xlabel('Epoch')
     plt.ylabel('Accuracy')
     plt.legend()
-
     plt.subplot(1, 2, 2)
-    plt.plot(history.history['loss'], label='Train')
-    plt.plot(history.history['val_loss'], label='Validation')
-    plt.title('Loss')
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.title('Model Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
-
     plt.tight_layout()
-    plt.savefig('training_results.png')
-    plt.close()
-    print("\nSaved training plot to 'training_results.png'")
+    plt.show()
 
-def capture_training_images(student_id, num_images=10):
-    """Capture training images from webcam."""
-    os.makedirs(CAPTURE_DIR, exist_ok=True)
-    cap = cv2.VideoCapture(0)
-
-    if not cap.isOpened():
-        print("Khong the mo camera!")
-        return False
-
-    print(f"\nDang chup {num_images} anh cho sinh vien: {student_id}")
-    time.sleep(2)
-    images_captured = 0
-
-    while images_captured < num_images:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        h, w = frame.shape[:2]
-        cx, cy = w // 2, h // 2
-        box = 300
-        cv2.rectangle(frame, (cx - box // 2, cy - box // 2), (cx + box // 2, cy + box // 2), (255, 255, 255), 2)
-        cv2.putText(frame, f"IMG {images_captured + 1}/{num_images}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(frame, "SPACE: take - Q: exit", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.imshow("Capture", frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord(' '):
-            filename = os.path.join(CAPTURE_DIR, f"{student_id}_{images_captured + 1}.jpg")
-            cv2.imwrite(filename, frame)
-            images_captured += 1
-            time.sleep(0.5)
-        elif key == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-    if images_captured < num_images:
-        print(f"\nChi chup duoc {images_captured}/{num_images} anh")
-        return False
-
-    print("\nHoan thanh chup anh")
-    return True
+    print("Model and label encoder saved successfully")
+    print(f"Label mapping: {label_dict}")
+    return model, label_dict
 
 if __name__ == "__main__":
-    student_id = input("Nhap ma so sinh vien: ").strip()
-    if not student_id:
-        print("Ma so sinh vien khong duoc de trong!")
-        exit()
-
-    print("\nHuong dan:")
-    print("- Dat mat vao khung trang")
-    print("- Nhấn SPACE de chup, Q de huy")
-
-    if capture_training_images(student_id):
-        print("\nDang huan luyen mo hinh...")
-        model, le = train_face_recognition()
-        if model:
-            print("\nHoan tat! Mo hinh san sang su dung.")
-    else:
-        print("\nChup anh that bai hoac huy bo.")
+    train_face_recognition()
